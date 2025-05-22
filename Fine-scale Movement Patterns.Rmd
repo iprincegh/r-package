@@ -1,0 +1,231 @@
+---
+title: "Spatial Analysis with Movement Patterns at Finer Scales"
+author: "Prince Oppong Boakye"
+date: "2025-05-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+  knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE)
+```
+
+## Setup (Mapbox Token)
+
+```{r}
+Sys.setenv(MAPBOX_TOKEN = "pk.eyJ1IjoicHJpbmNlb2IiLCJhIjoiY205eDVvY3JqMHhkNjJrc2FpaTY5cHp0YyJ9.dr1pXDjpG2p_yZ4R5OzYGA")
+```
+
+## Libraries
+
+```{r}
+library(spanishoddata)
+library(flowmapblue)
+library(tidyverse)
+library(sf)
+library(dplyr)
+library(ggplot2)
+```
+
+## Data Loading & Processing
+
+```{r}
+setwd("~/Desktop/SDSWR Assignment 1/dataanalysis")
+
+spod_set_data_dir(data_dir = "~/dataanalysis/spanish_od_data")
+
+```
+
+## Analysis
+
+```{r}
+od_20210407 <- spod_get("od", zones = "distr", dates = "2021-04-07")
+
+head(od_20210407)
+```
+
+```{r}
+districts_v1 <- spod_get_zones("dist", ver = 1)
+
+head(districts_v1)
+```
+
+```{r}
+str(flowmapblue::ch_locations)
+str(flowmapblue::ch_flows)
+```
+
+```{r}
+od_20210407_total <- od_20210407 |>
+  group_by(origin = id_origin, dest = id_destination) |>
+  summarise(count = sum(n_trips, na.rm = TRUE), .groups = "drop") |> 
+  collect()
+
+head(od_20210407_total)
+```
+
+```{r}
+districts_v1_centroids <- districts_v1 |>
+  st_transform(4326) |> 
+  st_centroid() |>
+  st_coordinates() |>
+  as.data.frame() |>
+  mutate(id = districts_v1$id) |>
+  rename(lon = X, lat = Y)
+
+head(districts_v1_centroids)
+```
+
+### Flowmap (Spain-Clustered)
+
+```{r}
+flowmap <- flowmapblue(
+  locations = districts_v1_centroids,
+  flows = od_20210407_total,
+  mapboxAccessToken = Sys.getenv("MAPBOX_TOKEN"),
+  darkMode = TRUE,
+  animation = FALSE,
+  clustering = TRUE
+  )
+
+flowmap
+```
+
+### Flowmap (Date & Time Series)
+
+```{r}
+od_20210407_time <- od_20210407 |>
+  mutate(time = as.POSIXct(paste0(date, "T", hour, ":00:00"))) |>
+  group_by(origin = id_origin, dest = id_destination, time) |>
+  summarise(count = sum(n_trips, na.rm = TRUE), .groups = "drop") |> 
+  collect()
+
+head(od_20210407_time)
+```
+
+### Flowmap (Spain-Non-Clustered)
+
+```{r}
+spain_fineScale <- flowmapblue(
+  locations = districts_v1_centroids,
+  flows = od_20210407_total,
+  mapboxAccessToken = Sys.getenv("MAPBOX_TOKEN"),
+  clustering = FALSE,
+  darkMode = TRUE,
+  animation = FALSE
+)
+spain_fineScale
+```
+
+### Flowmap + Date & Time Series)
+
+```{r}
+spain_fineScaleTimeSeries <- flowmapblue(
+  locations = districts_v1_centroids,
+  flows = od_20210407_time,
+  mapboxAccessToken = Sys.getenv("MAPBOX_TOKEN"),
+  clustering = FALSE,
+  darkMode = TRUE,
+  animation = FALSE
+)
+spain_fineScaleTimeSeries
+```
+
+### Madrid Districts
+
+```{r}
+zones_madrid <- districts_v1 |>
+  filter(grepl("Madrid distrito", district_names_in_v2, ignore.case = TRUE))
+
+zones_madrid_fua <- districts_v1[
+  st_buffer(zones_madrid, dist = 10000)
+  ,
+]
+
+zones_madrid_fua_plot <- ggplot() +
+  geom_sf(data = zones_madrid_fua, fill=NA, col = "grey60", linewidth = 0.3) +
+  theme_minimal()
+
+zones_madrid_fua_plot
+```
+
+```{r}
+zones_madrid_fua_coords <- zones_madrid_fua |>
+  st_transform(crs = 4326) |>
+  st_centroid() |>
+  st_coordinates() |>
+  as.data.frame() |>
+  mutate(id = zones_madrid_fua$id) |>
+  rename(lon = X, lat = Y)
+
+head(zones_madrid_fua_coords)
+```
+
+### Flowmap (Madrid-Clustered)
+
+```{r}
+od_20210407_time_madrid <- od_20210407_time |>
+  filter(origin %in% zones_madrid_fua$id & dest %in% zones_madrid_fua$id)
+
+madrid_fineScaleTimeSeries <- flowmapblue(
+  locations = zones_madrid_fua_coords,
+  flows = od_20210407_total,
+  mapboxAccessToken = Sys.getenv("MAPBOX_TOKEN"),
+  darkMode = TRUE,
+  animation = FALSE,
+  clustering = FALSE
+  )
+
+madrid_fineScaleTimeSeries
+```
+
+### Flowmap (Madrid-Non-Clustered + Date & Time Series)
+
+```{r}
+madrid_fineScaleTimeSeries <- flowmapblue(
+  locations = zones_madrid_fua_coords,
+  flows = od_20210407_time_madrid,
+  mapboxAccessToken = Sys.getenv("MAPBOX_TOKEN"),
+  darkMode = TRUE,
+  animation = FALSE,
+  clustering = FALSE
+  )
+
+madrid_fineScaleTimeSeries
+```
+
+### Total flows Madrid District + 10Km FUA Heatmap
+
+```{r}
+out_flows <- od_20210407_total |>
+  group_by(id = origin) |>
+  summarise(out_flows = sum(count))
+
+in_flows <- od_20210407_total |>
+  group_by(id = dest) |>
+  summarise(in_flows = sum(count))
+
+flow_totals <- out_flows |>
+  full_join(in_flows, by = "id") |>
+  mutate(
+    out_flows = replace_na(out_flows, 0),
+    in_flows = replace_na(in_flows, 0),
+    total_flows = out_flows + in_flows
+  )
+
+madrid_activity <- zones_madrid_fua |>
+  left_join(flow_totals, by = "id") |>
+  st_as_sf()
+
+
+ggplot(madrid_activity) +
+  geom_sf(aes(fill = total_flows), color = "grey", alpha = 0.8) +
+  scale_fill_gradientn(colors = RColorBrewer::brewer.pal(9, "YlOrRd")) +
+  labs(title = "Madrid Mobility Flows") +
+  theme_minimal()
+```
+
+## Research Questions
+
+1.  How do the mobility patterns in Madrid differ from those in other regions of Spain?
+2.  How do mobility-based contact points (created from simulated flows) relate to historical patterns of disease spread, and in restricted movement scenarios can that reduce hypothetical transmissions?
+3.  To what extent could we simulate fine-scale population flows by harnessing multi-source datasets to approximate realistic contact patterns for disease transmission models in Madrid?
